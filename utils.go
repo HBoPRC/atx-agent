@@ -215,6 +215,20 @@ func listAllProcs() (ps []ProcInfo, err error) {
 	return
 }
 
+func findProcAll(packageName string) (procList []procfs.Proc, err error) {
+	procs, err := procfs.AllProcs()
+	for _, proc := range procs {
+		cmdline, _ := proc.CmdLine()
+		if len(cmdline) != 1 {
+			continue
+		}
+		if cmdline[0] == packageName || strings.HasPrefix(cmdline[0], packageName+":") {
+			procList = append(procList, proc)
+		}
+	}
+	return
+}
+
 // pidof
 func pidOf(packageName string) (pid int, err error) {
 	fs, err := procfs.NewFS(procfs.DefaultMountPoint)
@@ -272,12 +286,14 @@ func readPackageInfoFromPath(apkpath string) (info PackageInfo, err error) {
 		err = errors.Wrap(err, apkpath)
 		return
 	}
+	defer pkg.Close()
+
 	info.PackageName = pkg.PackageName()
 	info.Label, _ = pkg.Label(nil)
 	info.MainActivity, _ = pkg.MainActivity()
 	info.Icon, _ = pkg.Icon(nil)
-	info.VersionCode = pkg.Manifest().VersionCode
-	info.VersionName = pkg.Manifest().VersionName
+	info.VersionCode = int(pkg.Manifest().VersionCode.MustInt32())
+	info.VersionName = pkg.Manifest().VersionName.MustString()
 	return
 }
 

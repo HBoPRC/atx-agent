@@ -34,14 +34,12 @@ import (
 )
 
 type Server struct {
-	tunnel     *TunnelProxy
+	// tunnel     *TunnelProxy
 	httpServer *http.Server
 }
 
-func NewServer(tunnel *TunnelProxy) *Server {
-	server := &Server{
-		tunnel: tunnel,
-	}
+func NewServer() *Server {
+	server := &Server{}
 	server.initHTTPServer()
 	return server
 }
@@ -160,6 +158,45 @@ func (server *Server) initHTTPServer() {
 		renderJSON(w, info)
 	})
 
+	// list all webview paths
+	// ref:
+	m.HandleFunc("/proc/{pkgname}/webview", func(w http.ResponseWriter, r *http.Request) {
+		packageName := mux.Vars(r)["pkgname"]
+		netUnix, err := procfs.NewNetUnix()
+		if err != nil {
+			return
+		}
+
+		unixPaths := make(map[string]bool, 0)
+		for _, row := range netUnix.Rows {
+			if !strings.HasPrefix(row.Path, "@") {
+				continue
+			}
+			if !strings.Contains(row.Path, "devtools_remote") {
+				continue
+			}
+			unixPaths[row.Path[1:]] = true
+		}
+
+		result := make([]interface{}, 0)
+		procs, err := findProcAll(packageName)
+		for _, proc := range procs {
+			cmdline, _ := proc.CmdLine()
+			suffix := "_" + strconv.Itoa(proc.PID)
+
+			for socketPath := range unixPaths {
+				if strings.HasSuffix(socketPath, suffix) {
+					result = append(result, map[string]interface{}{
+						"pid":        proc.PID,
+						"name":       cmdline[0],
+						"socketPath": socketPath,
+					})
+				}
+			}
+		}
+		renderJSON(w, result)
+	})
+
 	m.HandleFunc("/pidof/{pkgname}", func(w http.ResponseWriter, r *http.Request) {
 		pkgname := mux.Vars(r)["pkgname"]
 		pid, err := pidOf(pkgname)
@@ -217,12 +254,7 @@ func (server *Server) initHTTPServer() {
 		pkgname := mux.Vars(r)["pkgname"]
 		pid, _ := strconv.Atoi(mux.Vars(r)["pid"])
 
-		pfs, err := procfs.NewFS(procfs.DefaultMountPoint)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		proc, err := pfs.NewProc(pid)
+		proc, err := procfs.NewProc(pid)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusGone) // 410
 			return
@@ -317,7 +349,9 @@ func (server *Server) initHTTPServer() {
 	m.HandleFunc("/uiautomator", func(w http.ResponseWriter, r *http.Request) {
 		err := service.Start("uiautomator")
 		if err == nil {
-			io.WriteString(w, "Success")
+			io.WriteString(w, "Successfully started")
+		} else if err == cmdctrl.ErrAlreadyRunning {
+			io.WriteString(w, "Already started")
 		} else {
 			http.Error(w, err.Error(), 500)
 		}
@@ -326,9 +360,11 @@ func (server *Server) initHTTPServer() {
 	m.HandleFunc("/uiautomator", func(w http.ResponseWriter, r *http.Request) {
 		err := service.Stop("uiautomator", true) // wait until program quit
 		if err == nil {
-			io.WriteString(w, "Success")
-		} else {
+			io.WriteString(w, "Successfully stopped")
+		} else if err == cmdctrl.ErrAlreadyStopped {
 			io.WriteString(w, "Already stopped")
+		} else {
+			http.Error(w, err.Error(), 500)
 		}
 	}).Methods("DELETE")
 
@@ -366,10 +402,10 @@ func (server *Server) initHTTPServer() {
 	m.HandleFunc("/info/battery", func(w http.ResponseWriter, r *http.Request) {
 		apkServiceTimer.Reset(apkServiceTimeout)
 		deviceInfo.Battery.Update()
-		if err := server.tunnel.UpdateInfo(deviceInfo); err != nil {
-			io.WriteString(w, "Failure "+err.Error())
-			return
-		}
+		// if err := server.tunnel.UpdateInfo(deviceInfo); err != nil {
+		// 	io.WriteString(w, "Failure "+err.Error())
+		// 	return
+		// }
 		io.WriteString(w, "Success")
 	}).Methods("POST")
 

@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -309,11 +310,18 @@ var (
 
 	// target, _ := url.Parse("http://127.0.0.1:9008")
 	// uiautomatorProxy := httputil.NewSingleHostReverseProxy(target)
+
+	uiautomatorTimer = NewSafeTimer(time.Minute * 3)
+
 	uiautomatorProxy = &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.RawQuery = "" // ignore http query
 			req.URL.Scheme = "http"
 			req.URL.Host = "127.0.0.1:9008"
+
+			if req.URL.Path == "/jsonrpc/0" {
+				uiautomatorTimer.Reset()
+			}
 		},
 		Transport: &http.Transport{
 			// Ref: https://golang.org/pkg/net/http/#RoundTripper
@@ -461,7 +469,7 @@ func main() {
 	fStop := cmdServer.Flag("stop", "stop server").Bool()
 	cmdServer.Flag("port", "listen port").Default("7912").Short('p').IntVar(&listenPort) // Create on 2017/09/12
 	cmdServer.Flag("log", "log file path when in daemon mode").StringVar(&daemonLogPath)
-	fTunnelServer := cmdServer.Flag("server", "server url").Short('t').String()
+	fServerURL := cmdServer.Flag("server", "server url").Short('t').String()
 	fNoUiautomator := cmdServer.Flag("nouia", "do not start uiautoamtor when start").Bool()
 
 	// CMD: version
@@ -512,6 +520,20 @@ func main() {
 	// 		return
 	// 	}
 	// }
+
+	serverURL := *fServerURL
+	if serverURL != "" {
+		if !regexp.MustCompile(`https?://`).MatchString(serverURL) {
+			serverURL = "http://" + serverURL
+		}
+		u, err := url.Parse(serverURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		_ = u
+		// New
+		// u.Host
+	}
 
 	if _, err := os.Stat("/sdcard/tmp"); err != nil {
 		os.MkdirAll("/sdcard/tmp", 0755)
@@ -567,35 +589,46 @@ func main() {
 		Stderr:          os.Stderr,
 		MaxRetries:      3,
 		RecoverDuration: 30 * time.Second,
+		StopSignal:      os.Interrupt,
 		OnStart: func() error {
+			uiautomatorTimer.Reset()
 			log.Println("service uiautomator: startservice com.github.uiautomator/.Service")
 			runShell("am", "startservice", "-n", "com.github.uiautomator/.Service")
 			return nil
 		},
 		OnStop: func() {
+			uiautomatorTimer.Stop()
 			log.Println("service uiautomator: stopservice com.github.uiautomator/.Service")
 			runShell("am", "stopservice", "-n", "com.github.uiautomator/.Service")
+			runShell("am", "force-stop", "com.github.uiautomator")
 		},
 	})
+
+	// stop uiautomator when 3 minutes not requests
+	go func() {
+		for range uiautomatorTimer.C {
+			log.Println("uiautomator has not activity for 3 minutes, closed")
+			service.Stop("uiautomator")
+		}
+	}()
+
 	if !*fNoUiautomator {
 		if err := service.Start("uiautomator"); err != nil {
 			log.Println("uiautomator start failed:", err)
 		}
 	}
 
-	tunnel := &TunnelProxy{
-		ServerAddr: *fTunnelServer,
-		Secret:     "hello kitty",
-	}
-	if *fTunnelServer != "" {
-		devInfo.ServerURL = *fTunnelServer
-		if !regexp.MustCompile(`https?://`).MatchString(devInfo.ServerURL) {
-			devInfo.ServerURL = "http://" + devInfo.ServerURL
-		}
-		go tunnel.Heratbeat()
-	}
+	// tunnel := &TunnelProxy{
+	// 	ServerAddr: *fTunnelServer,
+	// 	Secret:     "hello kitty",
+	// }
+	// if *fTunnelServer != "" {
+	// 	devInfo.ServerURL = *fTunnelServer
 
-	server := NewServer(tunnel)
+	// 	go tunnel.Heratbeat()
+	// }
+
+	server := NewServer()
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
